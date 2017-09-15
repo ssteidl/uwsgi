@@ -2,5 +2,5 @@ NAME = 'tcl'
 
 CFLAGS = []
 LDFLAGS = []
-LIBS = ['-ltcl86']
+LIBS = ['-ltcl8.6']
 GCC_LIST = ['tcl']
