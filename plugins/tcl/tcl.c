@@ -85,7 +85,10 @@ static void uwsgi_tcl_app() {
         uwsgi_log("No tcl script provided: [%s line %d]\n", __FILE__, __LINE__);
         exit(1);
     }
+}
 
+static void uwsgi_tcl_after_fork()
+{
     //Initializes some tcl subsystems and calculates path to executable
     Tcl_FindExecutable(NULL);
     utcl.interp = Tcl_CreateInterp();
@@ -105,8 +108,8 @@ static void uwsgi_tcl_app() {
     tcl_error = Tcl_EvalFile(utcl.interp, utcl.tcl_script);
     if(tcl_error) {
 
-    	uwsgi_log("Error evaluating Tcl Script: '%s' [%s line %d]\n",
-    		  Tcl_GetStringResult(utcl.interp), __FILE__, __LINE__);
+        uwsgi_log("Error evaluating Tcl Script: '%s' [%s line %d]\n",
+              Tcl_GetStringResult(utcl.interp), __FILE__, __LINE__);
     }
 
 
@@ -115,13 +118,61 @@ static void uwsgi_tcl_app() {
     (void)respond_cmd_token;
 }
 
+static void add_to_environ_dict(Tcl_Obj* environ,
+                                char* key, size_t key_len,
+                                char* value, size_t val_len) {
+    int error = Tcl_DictObjPut(utcl.interp, environ,
+                               Tcl_NewStringObj(key, key_len),
+                               Tcl_NewStringObj(value, val_len));
+
+    if(error)
+    {
+        uwsgi_log("Unable to put key '%s' with value '%s' into tcl environ dict", key, value);
+        exit(1);
+    }
+
+}
+
 static int uwsgi_tcl_request(struct wsgi_request *wsgi_req) {
 
     uwsgi_log("found script: %s\n", utcl.tcl_script);
-    uwsgi_parse_vars(wsgi_req);
+    int error = uwsgi_parse_vars(wsgi_req);
+    assert(!error);
+
     wsgi_req->app_id = uwsgi_get_app_id(wsgi_req, wsgi_req->appid, wsgi_req->appid_len, 251);
 
-    int tcl_error = Tcl_Eval(utcl.interp, "/ shane");
+    //Create the environ variables
+    Tcl_Obj* app = Tcl_NewStringObj("application", 11);
+    Tcl_Obj* environ = Tcl_NewDictObj();
+    assert(environ);
+
+    add_to_environ_dict(environ,
+                        "REQUEST_METHOD", 14,
+                        wsgi_req->method, wsgi_req->method_len);
+
+    //TODO: DOCUMENT_ROOT.  Probably do it similar to cgi
+
+    int i;
+    //TODO: The stuff in this loop is what we need to add to the dictionary.
+    for(i=0;i<wsgi_req->var_cnt;i+=2) {
+        add_to_environ_dict(environ, wsgi_req->hvec[i].iov_base, wsgi_req->hvec[i].iov_len, wsgi_req->hvec[i+1].iov_base, wsgi_req->hvec[i+1].iov_len);
+    }
+
+    add_to_environ_dict(environ,
+                        "SCRIPT_FILENAME", 15,
+                        utcl.tcl_script, strlen(utcl.tcl_script));
+
+    add_to_environ_dict(environ,
+                        "QUERY_STRING", 12,
+                        wsgi_req->query_string, wsgi_req->query_string_len);
+
+    add_to_environ_dict(environ,
+                        "CONTENT_TYPE", 12,
+                        wsgi_req->content_type, wsgi_req->content_type_len);
+
+    Tcl_Obj* cmd[] = {app, environ};
+    Tcl_Obj* cmd_obj = Tcl_NewListObj(2, cmd);
+    int tcl_error = Tcl_EvalObj(utcl.interp, cmd_obj);
     if(tcl_error)
     {
         uwsgi_log("tcl error: %s\n", Tcl_GetStringResult(utcl.interp));
@@ -153,6 +204,7 @@ struct uwsgi_plugin tcl_plugin = {
         .name = "tcl",
         .modifier1 = 251,
         .init = uwsgi_tcl_init,
+        .post_fork = uwsgi_tcl_after_fork,
         .options = uwsgi_tcl_options,
         .init_apps = uwsgi_tcl_app,
         .request = uwsgi_tcl_request,
