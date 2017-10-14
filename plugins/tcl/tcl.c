@@ -33,6 +33,7 @@ static int uwsgi_tclrespond(ClientData clientData, Tcl_Interp *interp,
 
     if(objc != 4)
     {
+        //TODO: Content type should be a list of headers.
         Tcl_WrongNumArgs(interp, objc, objv, "Exactly 3 arguments required: <response code> <content-type> <payload>");
         return TCL_ERROR;
     }
@@ -78,6 +79,36 @@ static int uwsgi_tclrespond(ClientData clientData, Tcl_Interp *interp,
     return TCL_OK;
 }
 
+static int uwsgi_tclrequest_body(ClientData clientData, Tcl_Interp *interp,
+                                 int objc, struct Tcl_Obj *const *objv) {
+
+    if(objc != 2)
+    {
+        Tcl_WrongNumArgs(interp, objc, objv, "Expected exactly 1 argument: <read_size | -1>");
+        return TCL_ERROR;
+    }
+
+    int read_size = 0;
+    int ret = Tcl_GetIntFromObj(interp, objv[1], &read_size);
+    if(ret == TCL_ERROR)
+    {
+        return TCL_ERROR;
+    }
+
+    struct wsgi_request* wsgi_req = current_wsgi_req();
+    ssize_t actual = 0;
+    char* body = uwsgi_request_body_read(wsgi_req, read_size, &actual);
+    if(body == NULL)
+    {
+        Tcl_SetResult(interp, "Error reading request body", NULL);
+        return TCL_ERROR;
+    }
+
+    Tcl_Obj* body_obj = Tcl_NewByteArrayObj((unsigned char*)body, actual);
+    Tcl_SetObjResult(interp, body_obj);
+    return TCL_OK;
+}
+
 static void uwsgi_tcl_app() {
 
     if(utcl.tcl_script == NULL)
@@ -110,12 +141,16 @@ static void uwsgi_tcl_after_fork()
 
         uwsgi_log("Error evaluating Tcl Script: '%s' [%s line %d]\n",
               Tcl_GetStringResult(utcl.interp), __FILE__, __LINE__);
+        exit(1);
     }
 
 
     Tcl_Command respond_cmd_token = Tcl_CreateObjCommand(utcl.interp, "uwsgi::respond", uwsgi_tclrespond, NULL, NULL);
+    Tcl_Command req_body = Tcl_CreateObjCommand(utcl.interp, "uwsgi::request_body", uwsgi_tclrequest_body, NULL, NULL);
+
     //TODO: Store the token somewhere.
     (void)respond_cmd_token;
+    (void)req_body;
 }
 
 static void add_to_environ_dict(Tcl_Obj* environ,
@@ -135,9 +170,12 @@ static void add_to_environ_dict(Tcl_Obj* environ,
 
 static int uwsgi_tcl_request(struct wsgi_request *wsgi_req) {
 
-    uwsgi_log("found script: %s\n", utcl.tcl_script);
     int error = uwsgi_parse_vars(wsgi_req);
     assert(!error);
+
+    uwsgi_log("found script: %s, %d\n", utcl.tcl_script);
+    char* buffer[wsgi_req->len+1];
+    buffer[wsgi_req->len] = 0;
 
     wsgi_req->app_id = uwsgi_get_app_id(wsgi_req, wsgi_req->appid, wsgi_req->appid_len, 251);
 
@@ -151,16 +189,14 @@ static int uwsgi_tcl_request(struct wsgi_request *wsgi_req) {
                         wsgi_req->method, wsgi_req->method_len);
 
     //TODO: DOCUMENT_ROOT.  Probably do it similar to cgi
-
     int i;
-    //TODO: The stuff in this loop is what we need to add to the dictionary.
     for(i=0;i<wsgi_req->var_cnt;i+=2) {
         add_to_environ_dict(environ, wsgi_req->hvec[i].iov_base, wsgi_req->hvec[i].iov_len, wsgi_req->hvec[i+1].iov_base, wsgi_req->hvec[i+1].iov_len);
     }
 
     add_to_environ_dict(environ,
                         "SCRIPT_FILENAME", 15,
-                        utcl.tcl_script, strlen(utcl.tcl_script));
+                        wsgi_req->file, wsgi_req->file_len);
 
     add_to_environ_dict(environ,
                         "QUERY_STRING", 12,
@@ -170,20 +206,20 @@ static int uwsgi_tcl_request(struct wsgi_request *wsgi_req) {
                         "CONTENT_TYPE", 12,
                         wsgi_req->content_type, wsgi_req->content_type_len);
 
+    memcpy(buffer, wsgi_req->buffer, wsgi_req->len);
+    uwsgi_log("BODY: %s\n", buffer);
+
     Tcl_Obj* cmd[] = {app, environ};
     Tcl_Obj* cmd_obj = Tcl_NewListObj(2, cmd);
     int tcl_error = Tcl_EvalObj(utcl.interp, cmd_obj);
     if(tcl_error)
     {
-        uwsgi_log("tcl error: %s\n", Tcl_GetStringResult(utcl.interp));
+        Tcl_Obj* option_dict = Tcl_GetReturnOptions(utcl.interp, tcl_error);
+        char* dict_string = Tcl_GetStringFromObj(option_dict, NULL);
+//        Tcl_LogCommandInfo(utcl.interp, utcl.tcl_script, "application", -1);
+        uwsgi_log("tcl error: %s\n %s\n", Tcl_GetStringResult(utcl.interp), dict_string);
         return UWSGI_OK;
     }
-
-    Tcl_Obj* response = Tcl_GetObjResult(utcl.interp);
-    int content_length = 0;
-    char* response_string = Tcl_GetStringFromObj(response, &content_length);
-    uwsgi_log("response: %s, %d\n", response_string, content_length);
-    uwsgi_response_write_body_do(wsgi_req, response_string, content_length);
 
     return UWSGI_OK;
 }
