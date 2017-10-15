@@ -27,14 +27,13 @@ already_initialized:
     return 1;
 }
 
-static int uwsgi_tclrespond(ClientData clientData, Tcl_Interp *interp,
-                             int objc, struct Tcl_Obj *const *objv) {
+static int uwsgi_tclstartresponse(ClientData clientData, Tcl_Interp *interp,
+                                  int objc, struct Tcl_Obj *const *objv) {
     int tcl_error = TCL_OK;
 
-    if(objc != 4)
+    if(objc != 3)
     {
-        //TODO: Content type should be a list of headers.
-        Tcl_WrongNumArgs(interp, objc, objv, "Exactly 3 arguments required: <response code> <content-type> <payload>");
+        Tcl_WrongNumArgs(interp, objc, objv, "Exactly 3 arguments required: <response code> <headers>");
         return TCL_ERROR;
     }
 
@@ -58,23 +57,48 @@ static int uwsgi_tclrespond(ClientData clientData, Tcl_Interp *interp,
 
     struct wsgi_request* wsgi_req = current_wsgi_req();
     assert(wsgi_req);
+
+
     int error = uwsgi_response_prepare_headers(wsgi_req, status_number_str, status_number_len);
     assert(!error);
 
-    int content_type_len = 0;
-    char* content_type = Tcl_GetStringFromObj(objv[2], &content_type_len);
+    Tcl_DictSearch search;
+    Tcl_Obj* headers = objv[2];
+    Tcl_Obj* header_name = NULL;
+    Tcl_Obj* header_value = NULL;
+    int done = 0;
 
-    error = uwsgi_response_add_content_type(wsgi_req, content_type, content_type_len);
-    assert(!error);
+    tcl_error = Tcl_DictObjFirst(interp, headers, &search, &header_name, &header_value, &done);
+    if(tcl_error)
+    {
+        Tcl_SetResult(interp, "Error with header dictionary", TCL_STATIC);
+        return TCL_ERROR;
+    }
 
-    int payload_len = 0;
-    char* payload = Tcl_GetStringFromObj(objv[3], &payload_len);
+    for(; !done; Tcl_DictObjNext(&search, &header_name, &header_value, &done))
+    {
+        int name_length = 0;
+        char* header_str = Tcl_GetStringFromObj(header_name, &name_length);
 
-    error = uwsgi_response_add_content_length(wsgi_req, payload_len);
-    assert(!error);
+        int value_length = 0;
+        char* value_str = Tcl_GetStringFromObj(header_value, &value_length);
 
-    error = uwsgi_response_write_body_do(wsgi_req, payload, payload_len);
-    assert(!error);
+        error = uwsgi_response_add_header(wsgi_req,
+                                          header_str,
+                                          name_length,
+                                          value_str,
+                                          value_length);
+
+        if(error)
+        {
+            uwsgi_log("Internal error adding response headers: [%s line %d]\n", __FILE__, __LINE__);
+            Tcl_SetResult(interp, "error adding headers", TCL_STATIC);
+            return TCL_ERROR;
+        }
+
+    }
+
+    Tcl_DictObjDone(&search);
 
     return TCL_OK;
 }
@@ -145,7 +169,7 @@ static void uwsgi_tcl_after_fork()
     }
 
 
-    Tcl_Command respond_cmd_token = Tcl_CreateObjCommand(utcl.interp, "uwsgi::respond", uwsgi_tclrespond, NULL, NULL);
+    Tcl_Command respond_cmd_token = Tcl_CreateObjCommand(utcl.interp, "uwsgi::start_response", uwsgi_tclstartresponse, NULL, NULL);
     Tcl_Command req_body = Tcl_CreateObjCommand(utcl.interp, "uwsgi::request_body", uwsgi_tclrequest_body, NULL, NULL);
 
     //TODO: Store the token somewhere.
@@ -207,19 +231,30 @@ static int uwsgi_tcl_request(struct wsgi_request *wsgi_req) {
                         wsgi_req->content_type, wsgi_req->content_type_len);
 
     memcpy(buffer, wsgi_req->buffer, wsgi_req->len);
-    uwsgi_log("BODY: %s\n", buffer);
 
-    Tcl_Obj* cmd[] = {app, environ};
-    Tcl_Obj* cmd_obj = Tcl_NewListObj(2, cmd);
+    Tcl_Obj* start_response_cmd = Tcl_NewStringObj("::uwsgi::start_response", -1);
+    Tcl_Obj* cmd[] = {app, environ, start_response_cmd};
+    Tcl_Obj* cmd_obj = Tcl_NewListObj(sizeof(cmd)/sizeof(Tcl_Obj*), cmd);
     int tcl_error = Tcl_EvalObj(utcl.interp, cmd_obj);
     if(tcl_error)
     {
         Tcl_Obj* option_dict = Tcl_GetReturnOptions(utcl.interp, tcl_error);
         char* dict_string = Tcl_GetStringFromObj(option_dict, NULL);
-//        Tcl_LogCommandInfo(utcl.interp, utcl.tcl_script, "application", -1);
         uwsgi_log("tcl error: %s\n %s\n", Tcl_GetStringResult(utcl.interp), dict_string);
         return UWSGI_OK;
     }
+
+    Tcl_Obj* payload_obj = Tcl_GetObjResult(utcl.interp);
+
+    int payload_len = 0;
+    unsigned char* payload = Tcl_GetByteArrayFromObj(payload_obj, &payload_len);
+    assert(payload_len >= 0);
+
+    error = uwsgi_response_add_content_length(wsgi_req, payload_len);
+    assert(!error);
+
+    error = uwsgi_response_write_body_do(wsgi_req, (char*)payload, payload_len);
+    assert(!error);
 
     return UWSGI_OK;
 }
@@ -245,5 +280,4 @@ struct uwsgi_plugin tcl_plugin = {
         .init_apps = uwsgi_tcl_app,
         .request = uwsgi_tcl_request,
         .after_request = uwsgi_tcl_after_request,
-
 };
