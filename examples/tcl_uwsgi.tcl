@@ -1,4 +1,4 @@
-proc application {environ} {
+proc application {environ start_response} {
 
     set response_code {200}
     set payload {}
@@ -19,5 +19,7 @@ proc application {environ} {
 	}
     }
 
-    uwsgi::respond $response_code {text/plain} $payload
+    set headers [dict create {Content-Type} {text/plain} {X-JOE} {JACK}]
+    $start_response $response_code $headers
+    return $payload
 }
