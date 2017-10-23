@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <tcl8.6/tcl.h>
+#include "tcl_loop.h"
 #include <uwsgi.h>
 
 extern struct uwsgi_server uwsgi;
@@ -9,9 +10,16 @@ struct uwsgi_tcl
     int initialized;
     Tcl_Interp* interp;
     char* tcl_script;
+    int tcl_loop;
 };
 
 struct uwsgi_tcl utcl;
+
+
+static void tcl_loop()
+{
+    tcl_loop_run(&uwsgi);
+}
 
 static int uwsgi_tcl_init(){
     uwsgi_log("Initializing tcl plugin\n");
@@ -19,6 +27,11 @@ static int uwsgi_tcl_init(){
     if(utcl.initialized) {
 
         goto already_initialized;
+    }
+
+    if(utcl.tcl_loop)
+    {
+        uwsgi_register_loop( (char *) "tcl_loop", tcl_loop);
     }
 
     utcl.initialized = 1;
@@ -268,6 +281,10 @@ static void uwsgi_tcl_after_request(struct wsgi_request *wsgi_req) {
 struct uwsgi_option uwsgi_tcl_options[] = {
 
     {"tcl", required_argument, 0, "load a tcl app", uwsgi_opt_set_str, &utcl.tcl_script, 0},
+
+    {"tcl_loop", required_argument, 0, "setup the tcl loop engine with the specified number of async cores and optimized parameters",
+     uwsgi_opt_setup_tcl_loop, NULL, UWSGI_OPT_THREADS},
+
     {0, 0, 0, 0, 0, 0, 0}
 };
 struct uwsgi_plugin tcl_plugin = {
